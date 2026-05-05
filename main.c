@@ -430,7 +430,7 @@ void calculate_object_widths(void) {
                 }
             }
         }
-      double spread = readings[2] - readings[0]; // rejects outliers
+      double spread = readings[2] - readings[0]; // rejects outliers 6:51pm
       double chosen;
       if (spread > readings[1] * 0.20) {
         double d_low  = readings[1] - readings[0];
