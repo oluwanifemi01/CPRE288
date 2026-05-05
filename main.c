@@ -430,6 +430,20 @@ void calculate_object_widths(void) {
                 }
             }
         }
+      double spread = readings[2] - readings[0]; // rejects outliers
+      double chosen;
+      if (spread > readings[1] * 0.20) {
+        double d_low  = readings[1] - readings[0];
+        double d_high = readings[2] - readings[1];
+        if (d_low < d_high) {
+          chosen = readings[0];
+        } else {
+          chosen = readings[2];
+        }
+      } else {
+        chosen = readings[1];
+      }
+detected_objects[i].distance = chosen;
 
         detected_objects[i].distance = readings[1];
         if (detected_objects[i].distance <= 1.0 ||
