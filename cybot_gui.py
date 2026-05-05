@@ -69,6 +69,7 @@ class CyBotGUI:
         self.scan_ir:     list = []   # cm (IR calibration)
         self.objects:     list = []   # list of dicts
         self.clusters:    list = []   # list of dicts
+        self.best_route:  Optional[dict] = None
 
         # Parsing section flags
         self._in_scan     = False
@@ -256,6 +257,8 @@ class CyBotGUI:
             self.root.bind(f"<{k}>", lambda _e: self._cmd_toggle())
         for k in ("h", "H"):
             self.root.bind(f"<{k}>", lambda _e: self._cmd_heading())
+        for k in ("m", "M"):
+            self.root.bind(f"<{k}>", lambda _e: self._cmd_scan())
         for k in ("q", "Q"):
             self.root.bind(f"<{k}>", lambda _e: self._cmd_abort())
         self.root.bind("<Escape>", lambda _e: self._cmd_abort())
@@ -264,7 +267,7 @@ class CyBotGUI:
         sc = self._card(parent, "STATS")
         sc.pack(fill=tk.X, pady=(0, 5))
         self.stat_vars: dict = {}
-        for label in ["Objects", "Clusters", "Target", "Dist Ahead",
+        for label in ["Objects", "Clusters", "Target", "Dist Ahead", "Best Route",
                       "Heading", "Roll/Pitch", "IMU Calib", "IMU Status", "Status"]:
             row = tk.Frame(sc, bg=BG_PANEL)
             row.pack(fill=tk.X, padx=8, pady=1)
@@ -368,11 +371,67 @@ class CyBotGUI:
         ax.text(0, 0, "BOT", color="white", ha="center", va="center",
                 fontsize=6, fontweight="bold", zorder=11)
 
+    def _compute_best_route(self):
+        """Pick the clearest recent scan direction, biased toward straight ahead."""
+        if len(self.scan_angles) < 2 or len(self.scan_ping) != len(self.scan_angles):
+            return None
+
+        safe_cm = 65.0
+        min_candidate_cm = 35.0
+        best = None
+
+        for angle, dist in zip(self.scan_angles, self.scan_ping):
+            if dist <= 0:
+                continue
+
+            clearance = min(float(dist), 250.0)
+            offset = abs(float(angle) - 90.0)
+
+            # Strongly prefer forward-ish routes when clearance is similar.
+            score = clearance - (offset * 0.35)
+
+            # Avoid choosing a direction that points through a detected object arc.
+            for obj in self.objects:
+                if obj["start_angle"] - 5 <= angle <= obj["end_angle"] + 5:
+                    score -= 35.0
+                    break
+
+            if clearance < min_candidate_cm:
+                score -= 80.0
+
+            if best is None or score > best["score"]:
+                best = {
+                    "angle": float(angle),
+                    "clearance": clearance,
+                    "score": score,
+                    "safe": clearance >= safe_cm,
+                }
+
+        return best
+
+    def _route_text(self, route):
+        if route is None:
+            return "Scan needed"
+
+        angle = route["angle"]
+        clearance = route["clearance"]
+        turn = angle - 90.0
+
+        if clearance < 65.0:
+            return f"Blocked, turn/scan ({clearance:.0f}cm)"
+        if abs(turn) <= 7.5:
+            return f"Forward clear ({clearance:.0f}cm)"
+        if turn > 0:
+            return f"Turn left {turn:.0f}° ({clearance:.0f}cm)"
+        return f"Turn right {-turn:.0f}° ({clearance:.0f}cm)"
+
     def _update_radar(self):
         ax = self.ax
         ax.cla()
         ax.set_facecolor("#060c18")
         self._draw_radar_grid()
+        self.best_route = self._compute_best_route()
+        self.stat_vars["Best Route"].set(self._route_text(self.best_route))
 
         # ── Scan sweep (filled polygon) ──
         if len(self.scan_angles) >= 2 and len(self.scan_ping) == len(self.scan_angles):
@@ -433,6 +492,30 @@ class CyBotGUI:
                 xytext=(0, 0),
                 arrowprops=dict(arrowstyle="->", color=FG_ORANGE, lw=1.2, alpha=0.5)
             )
+
+        # ── Driver route recommendation ──
+        if self.best_route:
+            route = self.best_route
+            angle = route["angle"]
+            dist = min(route["clearance"], 190.0)
+            rad = math.radians(angle)
+            color = FG_GREEN if route["safe"] else FG_YELLOW
+            x, y = dist * math.cos(rad), dist * math.sin(rad)
+
+            ax.add_patch(patches.Wedge(
+                (0, 0), dist, angle - 8, angle + 8,
+                facecolor=color, alpha=0.12, edgecolor=color,
+                linewidth=1.0, linestyle="--", zorder=4
+            ))
+
+            ax.annotate(
+                "", xy=(x, y), xytext=(0, 0),
+                arrowprops=dict(arrowstyle="simple", color=color,
+                                lw=0, alpha=0.85, mutation_scale=22),
+                zorder=12
+            )
+            ax.text(x, y + 14, "Best route", color=color,
+                    ha="center", fontsize=8, fontweight="bold", zorder=13)
 
         self.fig_canvas.draw()
 
@@ -587,6 +670,9 @@ class CyBotGUI:
         if "Scanning 0-180" in s:
             self._in_scan, self._in_objects, self._in_clusters = True, False, False
             self.scan_angles.clear(); self.scan_ping.clear(); self.scan_ir.clear()
+            self.best_route = None
+            self.stat_vars["Best Route"].set("Scanning...")
+            self.stat_vars["Status"].set("Scanning field")
             self._log(s, "sys"); return
 
         if "DETECTED OBJECTS" in s:
@@ -616,6 +702,8 @@ class CyBotGUI:
                 self.scan_angles.append(float(m.group(1)))
                 self.scan_ping.append(min(float(m.group(2)), 250.0))
                 self.scan_ir.append(min(float(m.group(3)), 250.0))
+                if len(self.scan_angles) >= 3 and len(self.scan_angles) % 10 == 0:
+                    self._update_radar()
                 self._log(s, "data"); return
 
         # ── Object row ─────────────────────────────────────────────────────
@@ -836,10 +924,7 @@ class CyBotGUI:
         self._send("r")
 
     def _cmd_scan(self):
-        if self.mode != "MANUAL":
-            self._log("Manual scan requires MANUAL mode. Press Toggle Mode first.", "warn")
-            self.stat_vars["Status"].set("Toggle to manual")
-            return
+        self.stat_vars["Status"].set("Scan requested")
         self._send("m")
 
     def _cmd_toggle(self):
