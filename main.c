@@ -1125,7 +1125,7 @@ void escape_from_hazard(void) {
     // Small backup — only enough to fully clear the front sensor off the line.
     // Larger backups risk hitting objects behind the bot.
     move_backward(sensor_data, FORWARD_SPEED, 8);
-     oi_update(sensor_data); // to check if we run into another hazard // 6:08pm
+     oi_update(sensor_data); // to check if we run into another hazard // 6:08pm //pushed to the CCS project
     if (left_triggered && !right_triggered) {
         // Hazard on the left — turn right ~90° to run parallel to the line
         turn_right(sensor_data, TURN_SPEED, 90);
