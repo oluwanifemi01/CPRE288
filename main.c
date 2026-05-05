@@ -443,7 +443,7 @@ void calculate_object_widths(void) {
       } else {
         chosen = readings[1];
       }
-detected_objects[i].distance = chosen;
+      detected_objects[i].distance = chosen;
 
         detected_objects[i].distance = readings[1];
         if (detected_objects[i].distance <= 1.0 ||
