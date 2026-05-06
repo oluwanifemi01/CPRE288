@@ -92,6 +92,7 @@ Cluster  clusters[MAX_CLUSTERS];
 int      cluster_count = 0;
 
 bool         autonomous_mode = true;
+bool         cliff_warning_enabled = false;  // True in manual mode: warn on black tape
 cyBOT_Scan_t scan_data;
 oi_t        *sensor_data;
 bool complete = false;
@@ -129,6 +130,7 @@ bool hazard_detected(void);
 void escape_from_hazard(void);
 double ir_raw_to_cm(int raw_adc);
 static inline bool _front_cliff_tripped(void);
+static void check_manual_cliff_warning(void);
 
 
 //  Main 
@@ -150,8 +152,8 @@ int main(void) {
     }
 
     // *** Replace with your bot's calibration values ***
-    right_calibration_value = 232750;
-    left_calibration_value  = 1219750;
+    right_calibration_value = 274750;
+    left_calibration_value  = 1303750;
 
     sensor_data = oi_alloc();
     oi_init(sensor_data);
@@ -244,6 +246,8 @@ int main(void) {
 
             case 't': case 'T':
                 autonomous_mode = !autonomous_mode;
+                // Cliff black-tape warnings only fire in manual mode.
+                cliff_warning_enabled = !autonomous_mode;
                 uart_sendStr(autonomous_mode ? "\r\n>>> Mode: AUTONOMOUS\r\n"
                                              : "\r\n>>> Mode: MANUAL\r\nUse w/a/s/d, 'm' for scan\r\n");
                 break;
@@ -450,21 +454,6 @@ void calculate_object_widths(void) {
             readings[j] = scan_data.sound_dist;
             timer_waitMillis(40);
         }
-        double spread = readings[2] - readings[0]; // rejects outliers 6:51pm
-      double chosen;
-      if (spread > readings[1] * 0.20) {
-        double d_low  = readings[1] - readings[0];
-        double d_high = readings[2] - readings[1];
-        if (d_low < d_high) {
-          chosen = readings[0];
-        } else {
-          chosen = readings[2];
-        }
-      } else {
-        chosen = readings[1];
-      }
-      detected_objects[i].distance = chosen;
-
 
         detected_objects[i].distance = median_double(readings, OBJECT_PING_SAMPLES);
         if (detected_objects[i].distance <= 1.0 ||
@@ -1120,6 +1109,10 @@ void manual_control(char command) {
     char msg[50];
     sprintf(msg, "Distance ahead: %.1f cm\r\n", scan_data.sound_dist);
     uart_sendStr(msg);
+
+    // After each manual action, poll for black-tape trips and warn the
+    // driver naming which sensor caught it. No-op outside manual mode.
+    check_manual_cliff_warning();
 }
 
 // (Roam logic moved to roam_mission.c — invoked via run_roam_mission())
@@ -1159,6 +1152,45 @@ bool hazard_detected(void) {
     timer_waitMillis(CLIFF_DEBOUNCE_MS);
     oi_update(sensor_data);
     return _front_cliff_tripped();
+}
+
+// Manual-mode black-tape warning. Only emits when cliff_warning_enabled is
+// set (toggled on with 't' → MANUAL). Names which front cliff sensor saw the
+// black tape so the driver can correct course.
+static void check_manual_cliff_warning(void) {
+    if (!cliff_warning_enabled) return;
+
+    oi_update(sensor_data);
+    int fl = sensor_data->cliffFrontLeftSignal;
+    int fr = sensor_data->cliffFrontRightSignal;
+    bool black_left  = (fl < CLIFF_BLACK_THRESHOLD);
+    bool black_right = (fr < CLIFF_BLACK_THRESHOLD);
+
+    if (!black_left && !black_right) return;
+
+    // Debounce so a single noisy sample doesn't fire the warning.
+    timer_waitMillis(CLIFF_DEBOUNCE_MS);
+    oi_update(sensor_data);
+    fl = sensor_data->cliffFrontLeftSignal;
+    fr = sensor_data->cliffFrontRightSignal;
+    black_left  = (fl < CLIFF_BLACK_THRESHOLD);
+    black_right = (fr < CLIFF_BLACK_THRESHOLD);
+
+    if (!black_left && !black_right) return;
+
+    // Stop wheels immediately so the bot doesn't roll further onto the tape.
+    oi_setWheels(0, 0);
+
+    const char *who;
+    if (black_left && black_right) who = "FRONT-LEFT + FRONT-RIGHT";
+    else if (black_left)           who = "FRONT-LEFT";
+    else                           who = "FRONT-RIGHT";
+
+    char msg[160];
+    sprintf(msg,
+            ">>> CLIFF WARNING: BLACK tape detected by %s cliff sensor (FL=%d FR=%d) — STOPPED\r\n",
+            who, fl, fr);
+    uart_sendStr(msg);
 }
 
 // Escape: small backup just to clear the line, then turn parallel-ish to it
