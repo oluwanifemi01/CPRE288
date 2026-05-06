@@ -1076,7 +1076,25 @@ void manual_control(char command) {
     switch (command) {
         case 'w': case 'W':
             uart_sendStr(">>> Moving forward\r\n");
+
             move_forward(sensor_data, FORWARD_SPEED, 10);
+
+            oi_update(sensor_data); 
+
+            if (sensor_data->bumpLeft || sensor_data->bumpRight) {
+                if (sensor_data->bumpLeft && sensor_data->bumpRight) {
+                    uart_sendStr(">>> Bump detected: BOTH\r\n");
+                } else if (sensor_data->bumpLeft) {
+                    uart_sendStr(">>> Bump detected: LEFT\r\n");
+                } else if (sensor_data->bumpRight) {
+                    uart_sendStr(">>> Bump detected: RIGHT\r\n");
+                }
+            }
+            
+
+            if (hazard_detected()) {
+                uart_sendStr(">>> Line hazard detected during manual move!\r\n");
+            }
             break;
         case 's': case 'S':
             uart_sendStr(">>> Moving backward\r\n");
@@ -1085,10 +1103,18 @@ void manual_control(char command) {
         case 'a': case 'A':
             uart_sendStr(">>> Turning left\r\n");
             turn_left(sensor_data, TURN_SPEED, 15);
+            oi_update(sensor_data); // update after turn to get fresh cliff readings
+            if (hazard_detected()) {
+                uart_sendStr(">>> Line hazard detected during manual turn!\r\n");
+            }
             break;
         case 'd': case 'D':
             uart_sendStr(">>> Turning right\r\n");
             turn_right(sensor_data, TURN_SPEED, 15);
+            oi_update(sensor_data); // update after turn to get fresh cliff readings
+            if (hazard_detected()) {
+                uart_sendStr(">>> Line hazard detected during manual turn!\r\n");
+            }
             break;
         case 'm': case 'M':
             uart_sendStr(">>> Manual scan\r\n");
