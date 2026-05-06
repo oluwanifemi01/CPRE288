@@ -52,7 +52,7 @@
 //  Object Classification Thresholds 
 #define IR_OBJECT_RAW_THRESHOLD 80      // Raw IR above background to detect object
 #define MIN_OBJECT_ANGLE        8       // Minimum angular span to count as object
-#define THIN_PILLAR_MAX_WIDTH   60.0    // Max width (cm) for a small fish
+#define THIN_PILLAR_MAX_WIDTH   9.0    // Max width (cm) for a small fish
 #define MIN_CLUSTER_SIZE        3       // Minimum pillars to qualify as a cluster
 
 //  Cluster Gap Tolerance
@@ -1076,10 +1076,9 @@ void manual_control(char command) {
     switch (command) {
         case 'w': case 'W':
             uart_sendStr(">>> Moving forward\r\n");
-
             move_forward(sensor_data, FORWARD_SPEED, 10);
 
-            oi_update(sensor_data); 
+             oi_update(sensor_data); 
 
             if (sensor_data->bumpLeft || sensor_data->bumpRight) {
                 if (sensor_data->bumpLeft && sensor_data->bumpRight) {
@@ -1091,10 +1090,6 @@ void manual_control(char command) {
                 }
             }
             
-
-            if (hazard_detected()) {
-                uart_sendStr(">>> Line hazard detected during manual move!\r\n");
-            }
             break;
         case 's': case 'S':
             uart_sendStr(">>> Moving backward\r\n");
@@ -1103,18 +1098,10 @@ void manual_control(char command) {
         case 'a': case 'A':
             uart_sendStr(">>> Turning left\r\n");
             turn_left(sensor_data, TURN_SPEED, 15);
-            oi_update(sensor_data); // update after turn to get fresh cliff readings
-            if (hazard_detected()) {
-                uart_sendStr(">>> Line hazard detected during manual turn!\r\n");
-            }
             break;
         case 'd': case 'D':
             uart_sendStr(">>> Turning right\r\n");
             turn_right(sensor_data, TURN_SPEED, 15);
-            oi_update(sensor_data); // update after turn to get fresh cliff readings
-            if (hazard_detected()) {
-                uart_sendStr(">>> Line hazard detected during manual turn!\r\n");
-            }
             break;
         case 'm': case 'M':
             uart_sendStr(">>> Manual scan\r\n");
