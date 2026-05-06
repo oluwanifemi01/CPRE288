@@ -29,7 +29,13 @@
 
 //  Configuration Constants 
 #define SCAN_RESOLUTION         2       // Degrees per scan step
-#define IR_SAMPLES              5       // IR readings to average per angle
+#define IR_SAMPLES              7       // Samples per angle (odd, used as median)
+#define SCAN_SETTLE_MS          50      // Servo settle time after moving to new angle
+#define SCAN_INITIAL_SETTLE_MS  150     // Extra settle on first angle (servo recoil from 180→0)
+#define SAMPLE_SPACING_MS       30      // Delay between samples (PING echo decay)
+#define MIN_VALID_PING_CM       2.0     // Below this is the PING blind zone
+#define SCAN_PRINT_STEP_DEG     SCAN_RESOLUTION // Send every scan row to GUI
+#define OBJECT_PING_SAMPLES     5       // Median-filtered PING samples per object
 #define MAX_OBJECTS             20      // Maximum individual objects to track
 #define MAX_CLUSTERS            10      // Maximum clusters to track
 #define TURN_SPEED              25      // Speed for turning
@@ -38,15 +44,14 @@
 #define OBSTACLE_DISTANCE       40      // Distance to trigger obstacle avoidance (cm)
 #define BYPASS_FORWARD_CLEARANCE 65.0   // Must be clear before bypass moves forward
 #define MIN_BYPASS_CLEARANCE    45.0    // Side clearance needed before bypassing
-#define AVOID_SCAN_START_DEG    15      // Avoid extreme sideways servo angles
-#define AVOID_SCAN_END_DEG      165
-#define AVOID_SCAN_STEP_DEG     15      // Best-path sweep resolution
+/* Full 0–180° PING sweep for bypass pick (same angular step as object scan). */
+#define AVOID_SCAN_STEP_DEG     SCAN_RESOLUTION
 #define AVOID_FORWARD_BIAS      0.15    // Prefer near-forward paths when similar
 #define NUM_SCAN_ANGLES         ((180 / SCAN_RESOLUTION) + 1)
 
 //  Object Classification Thresholds 
 #define IR_OBJECT_RAW_THRESHOLD 80      // Raw IR above background to detect object
-#define MIN_OBJECT_ANGLE        4       // Minimum angular span to count as object
+#define MIN_OBJECT_ANGLE        8       // Minimum angular span to count as object
 #define THIN_PILLAR_MAX_WIDTH   60.0    // Max width (cm) for a small fish
 #define MIN_CLUSTER_SIZE        3       // Minimum pillars to qualify as a cluster
 
@@ -116,6 +121,7 @@ void display_cluster_info(void);
 double calculate_linear_width(int angle_diff, double distance);
 double calculate_polar_separation(double dist_a, double angle_a,
                                   double dist_b, double angle_b);
+double median_double(double values[], int count);
 void mission_abort_clear(void);
 void mission_abort_signal(void);
 bool mission_abort_requested(void);
@@ -144,8 +150,8 @@ int main(void) {
     }
 
     // *** Replace with your bot's calibration values ***
-    right_calibration_value = 274750;
-    left_calibration_value  = 1303750;
+    right_calibration_value = 232750;
+    left_calibration_value  = 1219750;
 
     sensor_data = oi_alloc();
     oi_init(sensor_data);
@@ -287,13 +293,21 @@ int main(void) {
 //  Scanning 
 
 /**
- * Sweep 0 - 180, averaging IR_SAMPLES readings at each step.
- * Stores results in ir_raw_values[] and ping_distances[].
+ * Sweep 0 - 180. Both IR and PING use a median over IR_SAMPLES samples per
+ * angle so a single bad reading cannot distort the map sent to the GUI.
+ * PING samples outside the sensor's valid range are dropped before the
+ * median so they do not poison the result.
  */
 void perform_full_scan(void) {
     uart_sendStr("Scanning 0-180 degrees...\r\n");
-    uart_sendStr("Angle  |  IR Raw (avg)  |  PING (cm)  |  IR (cm)\r\n");
+    uart_sendStr("Angle  |  IR Raw (med)  |  PING (cm)  |  IR (cm)\r\n");
     uart_sendStr("-------|----------------|-------------|----------\r\n");
+
+    // Servo recoil: previous scan ended at 180°, so we may be swinging
+    // back to 0°. Give it a longer one-time settle before the first sample
+    // so angle 0 isn't read mid-motion.
+    cyBOT_Scan(0, &scan_data);
+    timer_waitMillis(SCAN_INITIAL_SETTLE_MS);
 
     int angle, index = 0;
     for (angle = 0; angle <= 180; angle += SCAN_RESOLUTION) {
@@ -303,20 +317,36 @@ void perform_full_scan(void) {
             return;
         }
 
-        long ir_sum = 0;
-        double ping_sum = 0.0;
+        // Position servo, then let it settle before sampling so the first
+        // reading isn't taken mid-motion.
+        cyBOT_Scan(angle, &scan_data);
+        timer_waitMillis(SCAN_SETTLE_MS);
+
+        double ping_readings[IR_SAMPLES];
+        double ir_readings[IR_SAMPLES];
+        int valid_ping = 0;
         int i;
         for (i = 0; i < IR_SAMPLES; i++) {
             cyBOT_Scan(angle, &scan_data);
-            ir_sum += scan_data.IR_raw_val;
-            ping_sum += scan_data.sound_dist;
-            timer_waitMillis(5);
-        }
-        ir_raw_values[index]   = (int)(ir_sum / IR_SAMPLES);
-        ping_distances[index]  = ping_sum / IR_SAMPLES;
-        ir_distances[index]    = ir_raw_to_cm(ir_raw_values[index]);
+            ir_readings[i] = (double)scan_data.IR_raw_val;
 
-        if (angle % 10 == 0) {
+            // Filter PING samples to the sensor's valid range. Anything
+            // below MIN_VALID_PING_CM is in the blind zone; anything above
+            // MAX_VALID_PING_CM is a bad echo / timeout. Bad samples are
+            // dropped rather than averaged in.
+            double raw_ping = scan_data.sound_dist;
+            if (raw_ping >= MIN_VALID_PING_CM && raw_ping <= MAX_VALID_PING_CM) {
+                ping_readings[valid_ping++] = raw_ping;
+            }
+            timer_waitMillis(SAMPLE_SPACING_MS);
+        }
+        ir_raw_values[index]  = (int)median_double(ir_readings, IR_SAMPLES);
+        ping_distances[index] = (valid_ping > 0)
+                                ? median_double(ping_readings, valid_ping)
+                                : 0.0;  // 0 = no valid echo at this angle
+        ir_distances[index]   = ir_raw_to_cm(ir_raw_values[index]);
+
+        if (angle % SCAN_PRINT_STEP_DEG == 0) {
             char line[100];
             sprintf(line, " %3d   |    %5d       |  %6.1f  |  %6.1f\r\n",
                     angle, ir_raw_values[index], ping_distances[index], ir_distances[index]);
@@ -412,25 +442,15 @@ void calculate_object_widths(void) {
 
     int i;
     for (i = 0; i < object_count; i++) {
-        double readings[3];
-        int j, k;
+        double readings[OBJECT_PING_SAMPLES];
+        int j;
 
-        for (j = 0; j < 3; j++) {
+        for (j = 0; j < OBJECT_PING_SAMPLES; j++) {
             cyBOT_Scan(detected_objects[i].mid_angle, &scan_data);
             readings[j] = scan_data.sound_dist;
             timer_waitMillis(40);
         }
-
-        for (j = 0; j < 2; j++) {
-            for (k = 0; k < 2 - j; k++) {
-                if (readings[k] > readings[k + 1]) {
-                    double tmp = readings[k];
-                    readings[k] = readings[k + 1];
-                    readings[k + 1] = tmp;
-                }
-            }
-        }
-      double spread = readings[2] - readings[0]; // rejects outliers 6:51pm
+        double spread = readings[2] - readings[0]; // rejects outliers 6:51pm
       double chosen;
       if (spread > readings[1] * 0.20) {
         double d_low  = readings[1] - readings[0];
@@ -445,16 +465,13 @@ void calculate_object_widths(void) {
       }
       detected_objects[i].distance = chosen;
 
-        detected_objects[i].distance = readings[1];
+
+        detected_objects[i].distance = median_double(readings, OBJECT_PING_SAMPLES);
         if (detected_objects[i].distance <= 1.0 ||
             detected_objects[i].distance > MAX_VALID_PING_CM) {
             int mid_index = detected_objects[i].mid_angle / SCAN_RESOLUTION;
             if (mid_index >= 0 && mid_index < NUM_SCAN_ANGLES) {
                 detected_objects[i].distance = ping_distances[mid_index];
-              /** double ir_backdist = ir_distances[mid_index];
-              if (ir_backdist > 1.0 && ir_backdist < MAX_VALID_PING_CM) {
-               detected_objects[i].distance = ir_backdist;
-              */}
             }
         }
 
@@ -471,6 +488,30 @@ void calculate_object_widths(void) {
 double calculate_linear_width(int angle_diff, double distance) {
     double angle_rad = (angle_diff * M_PI) / 180.0;
     return 2.0 * distance * tan(angle_rad / 2.0);
+}
+
+double median_double(double values[], int count) {
+    int i, j;
+
+    if (count <= 0) {
+        return 0.0;
+    }
+
+    for (i = 0; i < count - 1; i++) {
+        for (j = 0; j < count - 1 - i; j++) {
+            if (values[j] > values[j + 1]) {
+                double tmp = values[j];
+                values[j] = values[j + 1];
+                values[j + 1] = tmp;
+            }
+        }
+    }
+
+    if ((count % 2) == 1) {
+        return values[count / 2];
+    }
+
+    return (values[(count / 2) - 1] + values[count / 2]) / 2.0;
 }
 
 double calculate_polar_separation(double dist_a, double angle_a,
@@ -548,8 +589,7 @@ void build_clusters(void) {
     current.count = 0;
 
     for (i = 0; i < object_count; i++) {
-        if (!detected_objects[i].is_thin) continue {
-        }// skip large pillars
+        if (!detected_objects[i].is_thin) continue; // skip large pillars
 
         if (current.count == 0) {
             // Start a new cluster with this pillar
@@ -873,7 +913,7 @@ void navigate_to_cluster(int cluster_index) {
 // Gentle obstacle avoidance.
 //   - If we got bumped, back off by just 4 cm (enough to break contact, but
 //     small enough that we won't slam into anything sitting behind us).
-//   - Sweep PING from 15 to 165 deg in 15 deg increments.
+//   - Sweep PING 0–180 deg at SCAN_RESOLUTION increments.
 //   - Pick the open angle with the best clearance, with a small bias toward
 //     90 deg so similar paths do not cause unnecessary hard turns.
 //   - Turn toward that angle, then verify the new forward path before inching
@@ -898,7 +938,7 @@ void avoid_obstacle(void) {
     bool found_clear_path = false;
 
     int angle;
-    for (angle = AVOID_SCAN_START_DEG; angle <= AVOID_SCAN_END_DEG; angle += AVOID_SCAN_STEP_DEG) {
+    for (angle = 0; angle <= 180; angle += AVOID_SCAN_STEP_DEG) {
         if (mission_abort_requested()) return;
 
         cyBOT_Scan(angle, &scan_data);
@@ -1143,7 +1183,7 @@ void escape_from_hazard(void) {
     // Small backup — only enough to fully clear the front sensor off the line.
     // Larger backups risk hitting objects behind the bot.
     move_backward(sensor_data, FORWARD_SPEED, 8);
-     oi_update(sensor_data); // to check if we run into another hazard // 6:08pm //pushed to the CCS project
+
     if (left_triggered && !right_triggered) {
         // Hazard on the left — turn right ~90° to run parallel to the line
         turn_right(sensor_data, TURN_SPEED, 90);
