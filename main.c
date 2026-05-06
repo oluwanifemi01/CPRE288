@@ -452,7 +452,7 @@ void calculate_object_widths(void) {
             if (mid_index >= 0 && mid_index < NUM_SCAN_ANGLES) {
                 detected_objects[i].distance = ping_distances[mid_index];
               /** double ir_backdist = ir_distances[mid_index];
-              if (ir_backdist > 1.0 && ir_fallback < MAX_VALID_PING_CM) {
+              if (ir_backdist > 1.0 && ir_backdist < MAX_VALID_PING_CM) {
                detected_objects[i].distance = ir_backdist;
               */}
             }
